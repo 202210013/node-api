@@ -1,471 +1,264 @@
-const path = require('path');
-const fs = require('fs');
-const { query, queryOne } = require('../config/database');
-const { getRelativeFilePath } = require('../middleware/upload');
+const BaseService = require("./BaseService");
+const fs = require("fs/promises");
+const path = require("path");
+const UserService = require("./UserService");
 
-class ProductService {
-  constructor() {
-    this.tableName = 'products';
-    this.uploadDir = path.join(__dirname, '../../e-comm-images');
-    this.baseUrl = 'http://localhost:3001/e-comm-images/';
+class ProductService extends BaseService {
+  constructor(db, userId = null, token = null) {
+    super(db);
+    this.userId = userId;
+    this.token = token;
+    this.tableName = "products";
+    this.uploadDir = path.resolve(__dirname, "../../../ecomm-images");
   }
 
-  // Create a new product
-  async createProduct(data, file, user) {
-    try {
-      console.log("CREATE PRODUCT - Starting creation process");
-      console.log("POST data:", data);
-      console.log("File data:", file);
+  async createProduct(payload = {}, imageFile = null, userId = null, token = null) {
+    const service = new UserService(this.db);
+    const tokenValidation = await service.validateToken(token || this.token);
+    if (!tokenValidation.valid) {
+      return { error: "Invalid token." };
+    }
 
-      if (!file) {
-        return {
-          success: false,
-          error: 'No image uploaded',
-          status: 400
-        };
-      }
+    if (!imageFile) {
+      return { error: "No image uploaded" };
+    }
 
-      const { name, price, description, category, available_sizes, size_quantities } = data;
+    const name = String(payload.name || "").trim();
+    const price = Number(payload.price);
+    const description = String(payload.description || "").trim();
+    const category = String(payload.category || "").trim();
 
-      // Validate required fields
-      if (!name || !price || !description) {
-        return {
-          success: false,
-          error: 'Missing required fields: name, price, or description',
-          status: 400
-        };
-      }
+    if (!name || !description || !Number.isFinite(price) || price <= 0) {
+      return { error: "Missing required fields: name, price, or description" };
+    }
 
-      // Validate price
-      const numericPrice = parseFloat(price);
-      if (isNaN(numericPrice) || numericPrice <= 0) {
-        return {
-          success: false,
-          error: 'Price must be a positive number',
-          status: 400
-        };
-      }
+    const allowedTypes = ["image/jpeg", "image/png", "image/gif"];
+    if (!allowedTypes.includes(imageFile.mimetype)) {
+      return { error: "Invalid image type. Only JPEG, PNG, and GIF are allowed." };
+    }
 
-      // Handle available sizes
-      let sizesArray = [];
-      if (available_sizes) {
+    if (Number(imageFile.size || 0) > 50000000) {
+      return { error: "Image size exceeds 50 MB" };
+    }
+
+    await fs.mkdir(this.uploadDir, { recursive: true });
+
+    const uniqueName = `${Date.now()}_${Math.floor(Math.random() * 1e6)}_${path.basename(imageFile.originalname || "image.jpg")}`;
+    await fs.rename(imageFile.path, path.join(this.uploadDir, uniqueName));
+
+    let availableSizes = ["S", "M", "L", "XL"];
+    if (payload.available_sizes) {
+      if (typeof payload.available_sizes === "string") {
         try {
-          sizesArray = typeof available_sizes === 'string' 
-            ? JSON.parse(available_sizes) 
-            : available_sizes;
-        } catch (e) {
-          sizesArray = ['S', 'M', 'L', 'XL']; // Default sizes
-        }
-      } else {
-        sizesArray = ['S', 'M', 'L', 'XL']; // Default sizes
-      }
-
-      // Handle size-specific quantities
-      let sizeQuantitiesObj = {};
-      let totalQuantity = 0;
-      
-      if (size_quantities) {
-        try {
-          sizeQuantitiesObj = typeof size_quantities === 'string' 
-            ? JSON.parse(size_quantities) 
-            : size_quantities;
-          
-          // Validate quantities are non-negative numbers
-          for (const [size, qty] of Object.entries(sizeQuantitiesObj)) {
-            const numericQty = parseInt(qty) || 0;
-            if (numericQty < 0) {
-              return {
-                success: false,
-                error: `Quantity for size ${size} cannot be negative`,
-                status: 400
-              };
-            }
-            sizeQuantitiesObj[size] = numericQty;
-            totalQuantity += numericQty;
+          const parsed = JSON.parse(payload.available_sizes);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            availableSizes = parsed;
           }
-        } catch (e) {
-          // If parsing fails, create default quantities
-          sizesArray.forEach(size => {
-            sizeQuantitiesObj[size] = 1;
-            totalQuantity += 1;
-          });
+        } catch (_e) {
+          availableSizes = ["S", "M", "L", "XL"];
         }
-      } else {
-        // Create default quantities for all sizes
-        sizesArray.forEach(size => {
-          sizeQuantitiesObj[size] = 1;
-          totalQuantity += 1;
-        });
+      } else if (Array.isArray(payload.available_sizes) && payload.available_sizes.length > 0) {
+        availableSizes = payload.available_sizes;
       }
-
-      // Get relative file path for database storage
-      const imageRelativePath = getRelativeFilePath(file.path);
-
-      // Insert into database
-      const result = await query(
-        `INSERT INTO ${this.tableName} 
-         (name, price, description, image, category, available_sizes, size_quantities, quantity, user_id) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          name,
-          numericPrice,
-          description,
-          imageRelativePath,
-          category || '',
-          JSON.stringify(sizesArray),
-          JSON.stringify(sizeQuantitiesObj),
-          totalQuantity,
-          user.id
-        ]
-      );
-
-      console.log("CREATE PRODUCT - Product created successfully");
-      
-      return {
-        success: true,
-        message: 'Product was created',
-        product_id: result.insertId,
-        status: 201
-      };
-    } catch (error) {
-      console.error('CREATE PRODUCT - Error:', error);
-      return {
-        success: false,
-        error: 'Unable to create product',
-        message: error.message,
-        status: 500
-      };
     }
-  }
 
-  // Read products for authenticated user
-  async readProducts(sellerEmail) {
+    const ownerId = userId || this.userId;
+    if (!ownerId) {
+      await fs.unlink(path.join(this.uploadDir, uniqueName)).catch(() => {});
+      return { error: "User context is required" };
+    }
+
     try {
-      let sql = `SELECT p.*, u.email as seller_email FROM ${this.tableName} p 
-                 LEFT JOIN users u ON p.user_id = u.id`;
-      let params = [];
-
-      if (sellerEmail) {
-        sql += ' WHERE u.email = ?';
-        params.push(sellerEmail);
-      }
-
-      sql += ' ORDER BY p.id DESC';
-
-      const products = await query(sql, params);
-      
-      // Process products - add full image URLs and parse available_sizes
-      const processedProducts = products.map(product => ({
-        ...product,
-        image: this.baseUrl + product.image,
-        available_sizes: product.available_sizes 
-          ? JSON.parse(product.available_sizes) 
-          : ['S', 'M', 'L', 'XL']
-      }));
-
-      return {
-        success: true,
-        records: processedProducts
-      };
-    } catch (error) {
-      console.error('Error reading products:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch products',
-        records: []
-      };
+      await this.db.query(
+        `INSERT INTO ${this.tableName} (name, price, description, image, category, available_sizes, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [name, price, description, uniqueName, category, JSON.stringify(availableSizes), ownerId]
+      );
+    } catch (err) {
+      await fs.unlink(path.join(this.uploadDir, uniqueName)).catch(() => {});
+      return { error: `Unable to create product: ${err.message}` };
     }
+
+    return { message: "Product was created." };
   }
 
-  // Read all products (public access)
+  async readProducts(userId = null, token = null) {
+    const service = new UserService(this.db);
+    const tokenValidation = await service.validateToken(token || this.token);
+    if (!tokenValidation.valid) {
+      return { error: "Invalid token." };
+    }
+
+    const rows = await this.db.query(
+      `SELECT * FROM ${this.tableName} WHERE user_id = ? ORDER BY id DESC`,
+      [userId || this.userId]
+    );
+
+    const baseUrl = `${(process.env.IMAGE_BASE_URL || "https://images.localfit.store/").replace(/\/+$/, "")}/`;
+
+    return {
+      records: rows.map((row) => ({
+        ...row,
+        image: `${baseUrl}${row.image}`,
+        available_sizes: row.available_sizes ? JSON.parse(row.available_sizes) : ["S", "M", "L", "XL"]
+      }))
+    };
+  }
+
   async readAllProducts() {
-    try {
-      const products = await query(
-        `SELECT p.*, u.name as seller_name, u.email as seller_email 
-         FROM ${this.tableName} p 
-         LEFT JOIN users u ON p.user_id = u.id 
-         ORDER BY p.id DESC`
-      );
+    const rows = await this.db.query(
+      `SELECT p.*, u.name AS seller_name
+       FROM ${this.tableName} p
+       JOIN users u ON p.user_id = u.id
+       ORDER BY p.id DESC`
+    );
 
-      // Process products
-      const processedProducts = products.map(product => ({
-        ...product,
-        image: this.baseUrl + product.image,
-        available_sizes: product.available_sizes 
-          ? JSON.parse(product.available_sizes) 
-          : ['S', 'M', 'L', 'XL']
-      }));
-
-      return {
-        success: true,
-        records: processedProducts
-      };
-    } catch (error) {
-      console.error('Error reading all products:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch products',
-        records: []
-      };
-    }
+    return {
+      records: rows.map((row) => ({
+        ...row,
+        available_sizes: row.available_sizes ? JSON.parse(row.available_sizes) : ["S", "M", "L", "XL"]
+      }))
+    };
   }
 
-  // Read all products offline (cached version)
-  async readAllProductsOffline() {
-    // This could be the same as readAllProducts or implement caching
-    return await this.readAllProducts();
-  }
-
-  // Read single product
   async readOneProduct(id) {
-    try {
-      if (!id) {
-        return {
-          success: false,
-          error: 'Product ID is required',
-          status: 400
-        };
-      }
-
-      const product = await queryOne(
-        `SELECT p.*, u.name as seller_name, u.email as seller_email 
-         FROM ${this.tableName} p 
-         LEFT JOIN users u ON p.user_id = u.id 
-         WHERE p.id = ?`,
-        [id]
-      );
-
-      if (!product) {
-        return {
-          success: false,
-          error: 'Product not found',
-          status: 404
-        };
-      }
-
-      // Process product
-      const processedProduct = {
-        ...product,
-        image: this.baseUrl + product.image,
-        available_sizes: product.available_sizes 
-          ? JSON.parse(product.available_sizes) 
-          : ['S', 'M', 'L', 'XL']
-      };
-
-      return {
-        success: true,
-        product: processedProduct
-      };
-    } catch (error) {
-      console.error('Error reading product:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch product',
-        status: 500
-      };
+    const rows = await this.db.query(`SELECT * FROM ${this.tableName} WHERE id = ?`, [id]);
+    if (!rows[0]) {
+      return { message: "Product not found." };
     }
+    return rows[0];
   }
 
-  // Update product
-  async updateProduct(id, data, file, user) {
-    try {
-      if (!id) {
-        return {
-          success: false,
-          error: 'Product ID is required',
-          status: 400
-        };
+  async updateProduct(id, payload = {}, imageFile = null, userId = null, token = null) {
+    const service = new UserService(this.db);
+    const tokenValidation = await service.validateToken(token || this.token);
+    if (!tokenValidation.valid) {
+      return { error: "Invalid token." };
+    }
+
+    const ownerId = userId || this.userId;
+    const rows = await this.db.query(`SELECT * FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, ownerId]);
+    const product = rows[0];
+    if (!product) {
+      return { message: "Product not found." };
+    }
+
+    const name = payload.name !== undefined ? String(payload.name).trim() : product.name;
+    const price = payload.price !== undefined ? Number(payload.price) : Number(product.price);
+    const description = payload.description !== undefined ? String(payload.description).trim() : product.description;
+    const category = payload.category !== undefined ? String(payload.category).trim() : product.category;
+
+    let imageName = product.image;
+    if (imageFile) {
+      const allowedTypes = ["image/jpeg", "image/png", "image/gif"];
+      if (!allowedTypes.includes(imageFile.mimetype)) {
+        return { error: "Invalid image type" };
+      }
+      if (Number(imageFile.size || 0) > 50000000) {
+        return { error: "Image size exceeds 50 MB" };
       }
 
-      // Check if product exists and belongs to user
-      const existingProduct = await queryOne(
-        `SELECT * FROM ${this.tableName} WHERE id = ? AND user_id = ?`,
-        [id, user.id]
-      );
+      await fs.mkdir(this.uploadDir, { recursive: true });
+      imageName = `${Date.now()}_${Math.floor(Math.random() * 1e6)}_${path.basename(imageFile.originalname || "image.jpg")}`;
+      await fs.rename(imageFile.path, path.join(this.uploadDir, imageName));
 
-      if (!existingProduct) {
-        return {
-          success: false,
-          error: 'Product not found or access denied',
-          status: 404
-        };
+      if (product.image) {
+        const oldPath = path.join(this.uploadDir, product.image);
+        await fs.unlink(oldPath).catch(() => {});
       }
+    }
 
-      const { name, price, description, category, available_sizes, size_quantities } = data;
-      
-      console.log("UPDATE PRODUCT - Received data:");
-      console.log("- Product ID:", id);
-      console.log("- Available Sizes:", available_sizes);
-      console.log("- Size Quantities:", size_quantities);
-      console.log("- Raw data:", data);
-      
-      // Build update query dynamically
-      let updateFields = [];
-      let updateValues = [];
-
-      if (name !== undefined) {
-        updateFields.push('name = ?');
-        updateValues.push(name);
-      }
-
-      if (price !== undefined) {
-        const numericPrice = parseFloat(price);
-        if (isNaN(numericPrice) || numericPrice <= 0) {
-          return {
-            success: false,
-            error: 'Price must be a positive number',
-            status: 400
-          };
-        }
-        updateFields.push('price = ?');
-        updateValues.push(numericPrice);
-      }
-
-      // Handle size-specific quantities
-      if (size_quantities !== undefined) {
-        console.log("Processing size quantities update...");
+    let availableSizes = product.available_sizes ? JSON.parse(product.available_sizes) : ["S", "M", "L", "XL"];
+    if (payload.available_sizes !== undefined) {
+      if (typeof payload.available_sizes === "string") {
         try {
-          let sizeQuantitiesObj = typeof size_quantities === 'string' 
-            ? JSON.parse(size_quantities) 
-            : size_quantities;
-          
-          console.log("Parsed size quantities:", sizeQuantitiesObj);
-          let totalQuantity = 0;
-          
-          // Validate and calculate total quantity
-          for (const [size, qty] of Object.entries(sizeQuantitiesObj)) {
-            const numericQty = parseInt(qty) || 0;
-            if (numericQty < 0) {
-              return {
-                success: false,
-                error: `Quantity for size ${size} cannot be negative`,
-                status: 400
-              };
-            }
-            sizeQuantitiesObj[size] = numericQty;
-            totalQuantity += numericQty;
+          const parsed = JSON.parse(payload.available_sizes);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            availableSizes = parsed;
           }
-          
-          updateFields.push('size_quantities = ?');
-          updateValues.push(JSON.stringify(sizeQuantitiesObj));
-          
-          updateFields.push('quantity = ?');
-          updateValues.push(totalQuantity);
-          
-        } catch (e) {
-          return {
-            success: false,
-            error: 'Invalid size quantities format',
-            status: 400
-          };
+        } catch (_e) {
+          availableSizes = availableSizes;
         }
+      } else if (Array.isArray(payload.available_sizes) && payload.available_sizes.length > 0) {
+        availableSizes = payload.available_sizes;
       }
-
-      if (description !== undefined) {
-        updateFields.push('description = ?');
-        updateValues.push(description);
-      }
-
-      if (category !== undefined) {
-        updateFields.push('category = ?');
-        updateValues.push(category);
-      }
-
-      if (available_sizes !== undefined) {
-        let sizesArray = [];
-        try {
-          sizesArray = typeof available_sizes === 'string' 
-            ? JSON.parse(available_sizes) 
-            : available_sizes;
-        } catch (e) {
-          sizesArray = ['S', 'M', 'L', 'XL'];
-        }
-        updateFields.push('available_sizes = ?');
-        updateValues.push(JSON.stringify(sizesArray));
-      }
-
-      // Handle file update
-      if (file) {
-        const imageRelativePath = getRelativeFilePath(file.path);
-        updateFields.push('image = ?');
-        updateValues.push(imageRelativePath);
-
-        // Optionally delete old image file
-        // This would require implementing file deletion logic
-      }
-
-      if (updateFields.length === 0) {
-        return {
-          success: false,
-          error: 'No fields to update',
-          status: 400
-        };
-      }
-
-      // Add WHERE clause values
-      updateValues.push(id, user.id);
-
-      const sql = `UPDATE ${this.tableName} SET ${updateFields.join(', ')} WHERE id = ? AND user_id = ?`;
-      
-      await query(sql, updateValues);
-
-      return {
-        success: true,
-        message: 'Product updated successfully'
-      };
-    } catch (error) {
-      console.error('Error updating product:', error);
-      return {
-        success: false,
-        error: 'Failed to update product',
-        status: 500
-      };
     }
+
+    let sizeQuantitiesJson = null;
+    let totalQuantity = null;
+    if (payload.size_quantities !== undefined) {
+      let parsed = {};
+      if (typeof payload.size_quantities === "string") {
+        try {
+          parsed = JSON.parse(payload.size_quantities) || {};
+        } catch (_e) {
+          parsed = {};
+        }
+      } else if (typeof payload.size_quantities === "object" && payload.size_quantities !== null) {
+        parsed = payload.size_quantities;
+      }
+      sizeQuantitiesJson = JSON.stringify(parsed);
+      totalQuantity = Object.values(parsed).reduce((sum, v) => sum + Number(v || 0), 0);
+    }
+
+    let startingQuantitiesJson = null;
+    if (payload.starting_size_quantities !== undefined) {
+      let parsed = {};
+      if (typeof payload.starting_size_quantities === "string") {
+        try {
+          parsed = JSON.parse(payload.starting_size_quantities) || {};
+        } catch (_e) {
+          parsed = {};
+        }
+      } else if (typeof payload.starting_size_quantities === "object" && payload.starting_size_quantities !== null) {
+        parsed = payload.starting_size_quantities;
+      }
+      startingQuantitiesJson = JSON.stringify(parsed);
+    }
+
+    const fields = [
+      "name = ?",
+      "price = ?",
+      "description = ?",
+      "image = ?",
+      "category = ?",
+      "available_sizes = ?"
+    ];
+    const values = [name, price, description, imageName, category, JSON.stringify(availableSizes)];
+
+    if (sizeQuantitiesJson !== null) {
+      fields.push("size_quantities = ?");
+      fields.push("quantity = ?");
+      values.push(sizeQuantitiesJson, totalQuantity);
+    }
+    if (startingQuantitiesJson !== null) {
+      fields.push("starting_size_quantities = ?");
+      values.push(startingQuantitiesJson);
+    }
+
+    values.push(id, ownerId);
+
+    await this.db.query(`UPDATE ${this.tableName} SET ${fields.join(", ")} WHERE id = ? AND user_id = ?`, values);
+    return { message: "Product was updated." };
   }
 
-  // Delete product
-  async deleteProduct(id, user) {
-    try {
-      if (!id) {
-        return {
-          success: false,
-          error: 'Product ID is required',
-          status: 400
-        };
-      }
-
-      // Check if product exists and belongs to user
-      const existingProduct = await queryOne(
-        `SELECT * FROM ${this.tableName} WHERE id = ? AND user_id = ?`,
-        [id, user.id]
-      );
-
-      if (!existingProduct) {
-        return {
-          success: false,
-          error: 'Product not found or access denied',
-          status: 404
-        };
-      }
-
-      // Delete product from database
-      await query(`DELETE FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, user.id]);
-
-      // Optionally delete image file
-      // This would require implementing file deletion logic
-
-      return {
-        success: true,
-        message: 'Product deleted successfully'
-      };
-    } catch (error) {
-      console.error('Error deleting product:', error);
-      return {
-        success: false,
-        error: 'Failed to delete product',
-        status: 500
-      };
+  async deleteProduct(id, userId = null, token = null) {
+    const service = new UserService(this.db);
+    const tokenValidation = await service.validateToken(token || this.token);
+    if (!tokenValidation.valid) {
+      return { error: "Invalid token." };
     }
+
+    const ownerId = userId || this.userId;
+    const rows = await this.db.query(`SELECT image FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, ownerId]);
+    if (rows[0] && rows[0].image) {
+      await fs.unlink(path.join(this.uploadDir, rows[0].image)).catch(() => {});
+    }
+
+    await this.db.query("DELETE FROM carts WHERE product_id = ?", [id]);
+    await this.db.query(`DELETE FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, ownerId]);
+
+    return { message: "Product was deleted." };
   }
 }
 

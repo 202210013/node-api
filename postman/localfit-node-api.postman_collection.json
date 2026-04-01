@@ -1,0 +1,132 @@
+{
+  "info": {
+    "name": "LocalFit Node API",
+    "_postman_id": "2d84779b-4f94-4f9e-a433-4fdbdf6e4447",
+    "description": "Full endpoint collection for migrated LocalFit Node API.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8080" },
+    { "key": "token", "value": "" },
+    { "key": "userId", "value": "1" },
+    { "key": "orderId", "value": "1" },
+    { "key": "productId", "value": "1" },
+    { "key": "cartId", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+        }
+      ]
+    },
+    {
+      "name": "Auth & Users",
+      "item": [
+        {
+          "name": "POST /register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Test User\",\n  \"email\": \"test@example.com\",\n  \"cellphone\": \"09123456789\",\n  \"password\": \"secret123\"\n}" },
+            "url": "{{baseUrl}}/register"
+          }
+        },
+        {
+          "name": "POST /login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"test@example.com\",\n  \"password\": \"secret123\"\n}" },
+            "url": "{{baseUrl}}/login"
+          }
+        },
+        {
+          "name": "GET /check_login_status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "x-user-id", "value": "{{userId}}" }
+            ],
+            "url": "{{baseUrl}}/check_login_status"
+          }
+        },
+        {
+          "name": "GET /all-users",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/all-users?currentUser=test@example.com"
+          }
+        },
+        {
+          "name": "PUT /users/:userId/password",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"currentPassword\": \"secret123\",\n  \"newPassword\": \"secret456\"\n}" },
+            "url": "{{baseUrl}}/users/{{userId}}/password"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        { "name": "GET /products", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/products" } },
+        { "name": "GET /product-listing", "request": { "method": "GET", "url": "{{baseUrl}}/product-listing" } },
+        { "name": "GET /product-listing-offline", "request": { "method": "GET", "url": "{{baseUrl}}/product-listing-offline" } },
+        { "name": "GET /products-read", "request": { "method": "GET", "url": "{{baseUrl}}/products-read?id={{productId}}" } },
+        { "name": "POST /products-create (form-data)", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "body": { "mode": "formdata", "formdata": [{ "key": "name", "value": "Sample Product", "type": "text" }, { "key": "price", "value": "1200", "type": "text" }, { "key": "description", "value": "Sample description", "type": "text" }, { "key": "category", "value": "tops", "type": "text" }, { "key": "available_sizes", "value": "[\"S\",\"M\",\"L\"]", "type": "text" }, { "key": "image", "type": "file", "src": "" }] }, "url": "{{baseUrl}}/products-create" } },
+        { "name": "POST /products-update/:id (form-data)", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "body": { "mode": "formdata", "formdata": [{ "key": "name", "value": "Updated Product", "type": "text" }, { "key": "price", "value": "1000", "type": "text" }] }, "url": "{{baseUrl}}/products-update/{{productId}}" } },
+        { "name": "DELETE /products-delete/:id", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/products-delete/{{productId}}" } }
+      ]
+    },
+    {
+      "name": "Carts",
+      "item": [
+        { "name": "GET /carts", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/carts" } },
+        { "name": "GET /carts-read", "request": { "method": "GET", "url": "{{baseUrl}}/carts-read?id={{cartId}}" } },
+        { "name": "GET /cart-summary", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/cart-summary" } },
+        { "name": "POST /carts-create", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"product_id\": {{productId}},\n  \"quantity\": 2,\n  \"size\": \"M\",\n  \"pickup_date\": \"2026-04-15\"\n}" }, "url": "{{baseUrl}}/carts-create" } },
+        { "name": "POST /carts-update", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"id\": {{cartId}},\n  \"product_id\": {{productId}},\n  \"quantity\": 1,\n  \"size\": \"L\"\n}" }, "url": "{{baseUrl}}/carts-update" } },
+        { "name": "DELETE /carts-delete/:id", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/carts-delete/{{cartId}}" } },
+        { "name": "DELETE /carts-clear", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/carts-clear" } }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        { "name": "GET /orders", "request": { "method": "GET", "url": "{{baseUrl}}/orders" } },
+        { "name": "GET /orders/:id", "request": { "method": "GET", "url": "{{baseUrl}}/orders/{{orderId}}" } },
+        { "name": "GET /orders-by-status", "request": { "method": "GET", "url": "{{baseUrl}}/orders-by-status?status=pending" } },
+        { "name": "GET /order-stats", "request": { "method": "GET", "url": "{{baseUrl}}/order-stats" } },
+        { "name": "POST /orders (create)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "[\n  {\n    \"customer\": \"test@example.com\",\n    \"product\": \"Sample Product\",\n    \"quantity\": 1,\n    \"size\": \"M\",\n    \"pickup_date\": \"2026-04-15\"\n  }\n]" }, "url": "{{baseUrl}}/orders" } },
+        { "name": "POST /orders (approve)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"action\": \"approve\",\n  \"orderId\": {{orderId}}\n}" }, "url": "{{baseUrl}}/orders" } },
+        { "name": "POST /orders (decline)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"action\": \"decline\",\n  \"orderId\": {{orderId}},\n  \"remarks\": \"Out of stock\"\n}" }, "url": "{{baseUrl}}/orders" } },
+        { "name": "POST /orders (ready-for-pickup)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"action\": \"ready-for-pickup\",\n  \"orderId\": {{orderId}}\n}" }, "url": "{{baseUrl}}/orders" } },
+        { "name": "POST /orders (confirm-pickup)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"action\": \"confirm-pickup\",\n  \"orderId\": {{orderId}},\n  \"customerEmail\": \"test@example.com\",\n  \"orNumber\": \"OR-001\"\n}" }, "url": "{{baseUrl}}/orders" } },
+        { "name": "PUT /orders/:id", "request": { "method": "PUT", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"status\": \"pending\",\n  \"pickup_date\": \"2026-04-15\"\n}" }, "url": "{{baseUrl}}/orders/{{orderId}}" } }
+      ]
+    },
+    {
+      "name": "Messages & Ratings",
+      "item": [
+        { "name": "GET /messages", "request": { "method": "GET", "url": "{{baseUrl}}/messages?user1=test@example.com&user2=admin@example.com" } },
+        { "name": "POST /send-message", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"sender\": \"test@example.com\",\n  \"recipient\": \"admin@example.com\",\n  \"content\": \"Hello\"\n}" }, "url": "{{baseUrl}}/send-message" } },
+        { "name": "POST /messages-unread", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }], "url": "{{baseUrl}}/messages-unread" } },
+        { "name": "GET /ratings", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }], "url": "{{baseUrl}}/ratings" } },
+        { "name": "GET /ratings/product/:productId", "request": { "method": "GET", "url": "{{baseUrl}}/ratings/product/{{productId}}" } },
+        { "name": "GET /ratings/order/:orderId", "request": { "method": "GET", "url": "{{baseUrl}}/ratings/order/{{orderId}}" } },
+        { "name": "GET /ratings/summary/:productId", "request": { "method": "GET", "url": "{{baseUrl}}/ratings/summary/{{productId}}" } },
+        { "name": "POST /ratings", "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }, { "key": "x-user-id", "value": "{{userId}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"orderId\": {{orderId}},\n  \"productId\": {{productId}},\n  \"rating\": 5,\n  \"review\": \"Great!\"\n}" }, "url": "{{baseUrl}}/ratings" } }
+      ]
+    }
+  ]
+}

@@ -1,341 +1,146 @@
-const { query, queryOne } = require('../config/database');
+const BaseService = require("./BaseService");
+const UserService = require("./UserService");
 
-class CartService {
-  constructor() {
-    this.tableName = 'carts';
+class CartService extends BaseService {
+  constructor(db, userId = null, token = null) {
+    super(db);
+    this.userId = userId;
+    this.token = token;
+    this.tableName = "carts";
   }
 
-  // Create cart item
-  async createCart(data, user) {
-    try {
-      if (!data || Object.keys(data).length === 0) {
-        return {
-          success: false,
-          error: 'No data provided',
-          status: 400
-        };
-      }
-
-      const { product_id, quantity, size, pickup_date } = data;
-
-      if (!product_id || !quantity) {
-        return {
-          success: false,
-          error: 'Product ID and quantity are required',
-          status: 400
-        };
-      }
-
-      // Validate pickup date if provided
-      if (pickup_date && !this.isValidPickupDate(pickup_date)) {
-        return {
-          success: false,
-          error: 'Invalid pickup date. Date must be between today and 30 days from now.',
-          status: 400
-        };
-      }
-
-      // Check if the product exists
-      const product = await queryOne('SELECT id FROM products WHERE id = ?', [product_id]);
-      
-      if (!product) {
-        return {
-          success: false,
-          error: 'Product not found',
-          status: 404
-        };
-      }
-
-      // Insert into cart
-      const result = await query(
-        `INSERT INTO ${this.tableName} 
-         (product_id, quantity, size, pickup_date, user_id) 
-         VALUES (?, ?, ?, ?, ?)`,
-        [
-          product_id,
-          quantity,
-          size || 'M',
-          pickup_date || null,
-          user.id
-        ]
-      );
-
-      return {
-        success: true,
-        message: 'Cart item was created',
-        cart_id: result.insertId,
-        status: 201
-      };
-    } catch (error) {
-      console.error('Error creating cart:', error);
-      return {
-        success: false,
-        error: 'Unable to create cart item',
-        status: 500
-      };
+  async createCart(data, userId = null, token = null) {
+    const userService = new UserService(this.db);
+    const tokenValidation = await userService.validateToken(token || this.token);
+    if (!tokenValidation.valid) {
+      return { error: "Invalid token." };
     }
-  }
 
-  // Read user's cart items
-  async readCarts(user) {
-    try {
-      const carts = await query(
-        `SELECT c.id, c.product_id, c.quantity, c.size, c.pickup_date, c.user_id, 
-                p.name, p.price, p.description, p.image 
-         FROM ${this.tableName} c 
-         INNER JOIN products p ON c.product_id = p.id 
-         WHERE c.user_id = ?
-         ORDER BY c.id DESC`,
-        [user.id]
-      );
-
-      return {
-        success: true,
-        records: carts
-      };
-    } catch (error) {
-      console.error('Error reading carts:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch cart items',
-        records: []
-      };
+    if (!data || !data.product_id || !data.quantity) {
+      return { error: "Product ID and quantity are required" };
     }
+
+    const productId = Number(data.product_id);
+    const quantity = Number(data.quantity);
+    const size = data.size ? String(data.size) : "M";
+    const pickupDate = data.pickup_date ? String(data.pickup_date) : null;
+
+    if (pickupDate && !this.isValidPickupDate(pickupDate)) {
+      return { error: "Invalid pickup date. Date must be between today and 30 days from now." };
+    }
+
+    const products = await this.db.query("SELECT id FROM products WHERE id = ?", [productId]);
+    if (!products[0]) {
+      return { error: "Product not found" };
+    }
+
+    await this.db.query(
+      `INSERT INTO ${this.tableName} (product_id, quantity, size, pickup_date, user_id) VALUES (?, ?, ?, ?, ?)`,
+      [productId, quantity, size, pickupDate, userId || this.userId]
+    );
+
+    return { message: "Cart was created." };
   }
 
-  // Read single cart item
+  async readCarts(userId = null) {
+    const rows = await this.db.query(
+      `SELECT c.id, c.product_id, c.quantity, c.size, c.pickup_date, c.user_id, p.name, p.price, p.description, p.image
+       FROM ${this.tableName} c
+       INNER JOIN products p ON c.product_id = p.id
+       WHERE c.user_id = ?
+       ORDER BY c.id DESC`,
+      [userId || this.userId]
+    );
+
+    return { records: rows };
+  }
+
   async readOneCart(id) {
-    try {
-      if (!id) {
-        return {
-          success: false,
-          error: 'Cart ID is required',
-          status: 400
-        };
-      }
-
-      const cart = await queryOne(
-        `SELECT c.id, c.product_id, c.quantity, c.size, c.pickup_date, c.user_id, 
-                p.name, p.price, p.description, p.image 
-         FROM ${this.tableName} c 
-         INNER JOIN products p ON c.product_id = p.id 
-         WHERE c.id = ?`,
-        [id]
-      );
-
-      if (!cart) {
-        return {
-          success: false,
-          error: 'Cart item not found',
-          status: 404
-        };
-      }
-
-      return {
-        success: true,
-        cart: cart
-      };
-    } catch (error) {
-      console.error('Error reading cart item:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch cart item',
-        status: 500
-      };
+    const rows = await this.db.query(`SELECT * FROM ${this.tableName} WHERE id = ?`, [id]);
+    if (!rows[0]) {
+      return { message: "Cart not found." };
     }
+    return rows[0];
   }
 
-  // Update cart item
-  async updateCart(data, user) {
-    try {
-      if (!data || !data.id) {
-        return {
-          success: false,
-          error: 'Cart ID is required',
-          status: 400
-        };
-      }
+  async updateCart(data, userId = null) {
+    const productId = Number(data.product_id);
+    const quantity = Number(data.quantity);
+    const size = data.size ? String(data.size) : "M";
+    const pickupDate = data.pickup_date ? String(data.pickup_date) : null;
+    const id = Number(data.id);
 
-      const { id, quantity, size, pickup_date } = data;
-
-      // Check if cart item exists and belongs to user
-      const existingCart = await queryOne(
-        `SELECT * FROM ${this.tableName} WHERE id = ? AND user_id = ?`,
-        [id, user.id]
-      );
-
-      if (!existingCart) {
-        return {
-          success: false,
-          error: 'Cart item not found or access denied',
-          status: 404
-        };
-      }
-
-      // Validate pickup date if provided
-      if (pickup_date && !this.isValidPickupDate(pickup_date)) {
-        return {
-          success: false,
-          error: 'Invalid pickup date. Date must be between today and 30 days from now.',
-          status: 400
-        };
-      }
-
-      // Build update query dynamically
-      let updateFields = [];
-      let updateValues = [];
-
-      if (quantity !== undefined) {
-        updateFields.push('quantity = ?');
-        updateValues.push(quantity);
-      }
-
-      if (size !== undefined) {
-        updateFields.push('size = ?');
-        updateValues.push(size);
-      }
-
-      if (pickup_date !== undefined) {
-        updateFields.push('pickup_date = ?');
-        updateValues.push(pickup_date);
-      }
-
-      if (updateFields.length === 0) {
-        return {
-          success: false,
-          error: 'No fields to update',
-          status: 400
-        };
-      }
-
-      // Add WHERE clause values
-      updateValues.push(id, user.id);
-
-      const sql = `UPDATE ${this.tableName} SET ${updateFields.join(', ')} WHERE id = ? AND user_id = ?`;
-      
-      await query(sql, updateValues);
-
-      return {
-        success: true,
-        message: 'Cart item updated successfully'
-      };
-    } catch (error) {
-      console.error('Error updating cart:', error);
-      return {
-        success: false,
-        error: 'Failed to update cart item',
-        status: 500
-      };
+    if (pickupDate && !this.isValidPickupDate(pickupDate)) {
+      return { error: "Invalid pickup date. Date must be between today and 30 days from now." };
     }
+
+    await this.db.query(
+      `UPDATE ${this.tableName}
+       SET product_id = ?, quantity = ?, size = ?, pickup_date = ?
+       WHERE id = ? AND user_id = ?`,
+      [productId, quantity, size, pickupDate, id, userId || this.userId]
+    );
+
+    return { message: "Cart was updated." };
   }
 
-  // Delete cart item
-  async deleteCart(id, user) {
-    try {
-      if (!id) {
-        return {
-          success: false,
-          error: 'Cart ID is required',
-          status: 400
-        };
-      }
-
-      // Check if cart item exists and belongs to user
-      const existingCart = await queryOne(
-        `SELECT * FROM ${this.tableName} WHERE id = ? AND user_id = ?`,
-        [id, user.id]
-      );
-
-      if (!existingCart) {
-        return {
-          success: false,
-          error: 'Cart item not found or access denied',
-          status: 404
-        };
-      }
-
-      // Delete cart item
-      await query(`DELETE FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, user.id]);
-
-      return {
-        success: true,
-        message: 'Cart item deleted successfully'
-      };
-    } catch (error) {
-      console.error('Error deleting cart:', error);
-      return {
-        success: false,
-        error: 'Failed to delete cart item',
-        status: 500
-      };
+  async deleteCart(id, userId = null) {
+    const rows = await this.db.query(`SELECT id FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, userId || this.userId]);
+    if (!rows[0]) {
+      return { message: "Cart not found." };
     }
+
+    await this.db.query(`DELETE FROM ${this.tableName} WHERE id = ? AND user_id = ?`, [id, userId || this.userId]);
+    return { message: "Cart was deleted." };
   }
 
-  // Clear all cart items for user
-  async clearCart(user) {
-    try {
-      await query(`DELETE FROM ${this.tableName} WHERE user_id = ?`, [user.id]);
-
-      return {
-        success: true,
-        message: 'Cart cleared successfully'
-      };
-    } catch (error) {
-      console.error('Error clearing cart:', error);
-      return {
-        success: false,
-        error: 'Failed to clear cart',
-        status: 500
-      };
-    }
-  }
-
-  // Validate pickup date
   isValidPickupDate(pickupDate) {
-    try {
-      const date = new Date(pickupDate);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0); // Start of today
-      
-      const maxDate = new Date(today);
-      maxDate.setDate(today.getDate() + 30); // 30 days from today
-      
-      return date >= today && date <= maxDate;
-    } catch (error) {
+    if (!pickupDate || !/^\d{4}-\d{2}-\d{2}$/.test(pickupDate)) {
       return false;
     }
+
+    const inputDate = new Date(`${pickupDate}T00:00:00`);
+    if (Number.isNaN(inputDate.getTime())) {
+      return false;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const maxDate = new Date(today);
+    maxDate.setDate(maxDate.getDate() + 30);
+
+    return inputDate >= today && inputDate <= maxDate;
   }
 
-  // Get cart summary for user
-  async getCartSummary(user) {
-    try {
-      const summary = await queryOne(
-        `SELECT 
-           COUNT(*) as total_items,
-           SUM(c.quantity) as total_quantity,
-           SUM(c.quantity * p.price) as total_amount
-         FROM ${this.tableName} c 
-         INNER JOIN products p ON c.product_id = p.id 
-         WHERE c.user_id = ?`,
-        [user.id]
-      );
+  async clearCart(userId = null) {
+    await this.db.query(`DELETE FROM ${this.tableName} WHERE user_id = ?`, [userId || this.userId]);
+    return {
+      success: true,
+      message: "Cart cleared successfully"
+    };
+  }
 
-      return {
-        success: true,
-        summary: {
-          total_items: parseInt(summary.total_items) || 0,
-          total_quantity: parseInt(summary.total_quantity) || 0,
-          total_amount: parseFloat(summary.total_amount) || 0
-        }
-      };
-    } catch (error) {
-      console.error('Error getting cart summary:', error);
-      return {
-        success: false,
-        error: 'Failed to get cart summary',
-        status: 500
-      };
-    }
+  async getCartSummary(userId = null) {
+    const rows = await this.db.query(
+      `SELECT
+         COUNT(*) as total_items,
+         SUM(c.quantity) as total_quantity,
+         SUM(c.quantity * p.price) as total_amount
+       FROM ${this.tableName} c
+       INNER JOIN products p ON c.product_id = p.id
+       WHERE c.user_id = ?`,
+      [userId || this.userId]
+    );
+
+    const summary = rows[0] || {};
+    return {
+      success: true,
+      summary: {
+        total_items: Number(summary.total_items || 0),
+        total_quantity: Number(summary.total_quantity || 0),
+        total_amount: Number(summary.total_amount || 0)
+      }
+    };
   }
 }
 

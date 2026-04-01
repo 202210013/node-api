@@ -1,336 +1,132 @@
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const { query, queryOne } = require('../config/database');
+const bcrypt = require("bcrypt");
+const crypto = require("crypto");
+const BaseService = require("./BaseService");
 
-class UserService {
-  constructor() {
-    // No database connection needed here since we use the database module
+class UserService extends BaseService {
+  constructor(db) {
+    super(db);
   }
 
-  // Get all user emails and names
   async getAllEmails() {
-    try {
-      const users = await query('SELECT name, email FROM users');
-      return {
-        success: true,
-        data: users
-      };
-    } catch (error) {
-      console.error('Error fetching emails:', error);
-      throw new Error('Failed to fetch user emails');
-    }
+    const rows = await this.db.query("SELECT name, email FROM users");
+    return rows;
   }
 
-  // Get all users (id, name, email)
-  async getAllUsers() {
-    try {
-      const users = await query('SELECT id, name, email, cellphone FROM users');
-      return {
-        success: true,
-        data: users
-      };
-    } catch (error) {
-      console.error('Error fetching users:', error);
-      throw new Error('Failed to fetch users');
+  async getAllUsers(currentUserEmail = null) {
+    let isAdmin = false;
+
+    if (currentUserEmail) {
+      const roleRows = await this.db.query("SELECT role FROM users WHERE email = ?", [currentUserEmail]);
+      isAdmin = roleRows[0] && roleRows[0].role === "admin";
     }
+
+    if (isAdmin) {
+      return this.db.query(
+        "SELECT id, name, email, role FROM users WHERE (role IS NULL OR role != 'admin') AND email != ?",
+        [currentUserEmail]
+      );
+    }
+
+    return this.db.query("SELECT id, name, email, role FROM users WHERE role = 'admin'");
   }
 
-  // Check login status (for session-based auth)
-  async checkLoginStatus(req) {
-    try {
-      const loggedIn = req.session && req.session.user_id ? true : false;
-      return {
-        success: true,
-        loggedIn: loggedIn,
-        user_id: req.session?.user_id || null
-      };
-    } catch (error) {
-      console.error('Error checking login status:', error);
-      return {
-        success: false,
-        loggedIn: false,
-        error: 'Failed to check login status'
-      };
-    }
+  async checkLoginStatus(user = null) {
+    return {
+      loggedIn: Boolean(user && user.user_id),
+      user: user || null
+    };
   }
 
-  // Login user
   async loginUser(data) {
-    try {
-      const { email, password } = data;
+    const email = data && data.email ? String(data.email) : "";
+    const password = data && data.password ? String(data.password) : "";
 
-      if (!email || !password) {
-        return {
-          success: false,
-          error: 'Email and password are required',
-          status: 400
-        };
-      }
+    const users = await this.db.query("SELECT * FROM users WHERE email = ? LIMIT 1", [email]);
+    const user = users[0];
 
-      // Find user by email
-      const user = await queryOne('SELECT * FROM users WHERE email = ?', [email]);
-
-      if (!user) {
-        return {
-          success: false,
-          error: 'Invalid email or password',
-          status: 401
-        };
-      }
-
-      // Verify password
-      const passwordMatch = await bcrypt.compare(password, user.password);
-
-      if (!passwordMatch) {
-        return {
-          success: false,
-          error: 'Invalid email or password',
-          status: 401
-        };
-      }
-
-      // Generate JWT token
-      const token = jwt.sign(
-        { 
-          id: user.id, 
-          email: user.email, 
-          name: user.name 
-        },
-        process.env.JWT_SECRET,
-        { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
-      );
-
-      // Return success response
-      return {
-        success: true,
-        token: token,
-        user_id: user.id,
-        user: {
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          cellphone: user.cellphone
-        }
-      };
-    } catch (error) {
-      console.error('Error during login:', error);
-      return {
-        success: false,
-        error: 'Login failed',
-        status: 500
-      };
+    if (!user) {
+      return { error: "Invalid email or password" };
     }
+
+    const storedHash = String(user.password || "");
+    const normalizedHash = storedHash.startsWith("$2y$")
+      ? `$2b$${storedHash.slice(4)}`
+      : storedHash;
+
+    const ok = await bcrypt.compare(password, normalizedHash);
+    if (!ok) {
+      return { error: "Invalid email or password" };
+    }
+
+    const token = crypto.randomBytes(16).toString("hex");
+    return {
+      token,
+      user_id: user.id,
+      email: user.email
+    };
   }
 
-  // Logout user
-  async logoutUser(req) {
-    try {
-      if (req.session) {
-        req.session.destroy((err) => {
-          if (err) {
-            console.error('Session destruction error:', err);
-          }
-        });
-      }
-
-      return {
-        success: true,
-        message: 'Logged out successfully'
-      };
-    } catch (error) {
-      console.error('Error during logout:', error);
-      return {
-        success: false,
-        error: 'Logout failed'
-      };
-    }
+  async logoutUser() {
+    return { success: true, message: "Logged out" };
   }
 
-  // Register new user
   async registerUser(data) {
-    try {
-      const { name, email, cellphone, password } = data;
+    const name = data && data.name ? String(data.name) : null;
+    const email = data && data.email ? String(data.email) : "";
+    const cellphone = data && data.cellphone ? String(data.cellphone) : null;
+    const password = data && data.password ? String(data.password) : "";
+    const hash = await bcrypt.hash(password, 10);
 
-      if (!email || !password) {
-        return {
-          success: false,
-          error: 'Email and password are required',
-          status: 400
-        };
-      }
+    await this.db.query(
+      "INSERT INTO users (name, email, cellphone, password) VALUES (?, ?, ?, ?)",
+      [name, email, cellphone, hash]
+    );
 
-      // Check if user already exists
-      const existingUser = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
-      
-      if (existingUser) {
-        return {
-          success: false,
-          error: 'User with this email already exists',
-          status: 409
-        };
-      }
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 12);
-
-      // Insert new user
-      const result = await query(
-        'INSERT INTO users (name, email, cellphone, password) VALUES (?, ?, ?, ?)',
-        [name || null, email, cellphone || null, hashedPassword]
-      );
-
-      return {
-        success: true,
-        message: 'User was registered successfully',
-        user_id: result.insertId
-      };
-    } catch (error) {
-      console.error('Error during registration:', error);
-      
-      if (error.code === 'ER_DUP_ENTRY') {
-        return {
-          success: false,
-          error: 'User with this email already exists',
-          status: 409
-        };
-      }
-
-      return {
-        success: false,
-        error: 'Unable to register the user',
-        status: 500
-      };
-    }
+    return { message: "User was registered successfully." };
   }
 
-  // Set session (for session-based auth compatibility)
-  async setSession(data, req) {
-    try {
-      if (data.userId) {
-        req.session.user_id = data.userId;
-        return {
-          success: true,
-          message: 'Session set successfully'
-        };
-      } else {
-        return {
-          success: false,
-          error: 'Invalid data provided',
-          status: 400
-        };
-      }
-    } catch (error) {
-      console.error('Error setting session:', error);
-      return {
-        success: false,
-        error: 'Failed to set session',
-        status: 500
-      };
+  async setSession(data) {
+    const userId = data && (data.userId || data.user_id);
+    if (!userId) {
+      return { success: false, error: "user_id is required" };
     }
+
+    const token = crypto.randomBytes(16).toString("hex");
+
+    return {
+      success: true,
+      token,
+      user_id: userId
+    };
   }
 
-  // Validate JWT token
   async validateToken(token) {
-    try {
-      if (!token) {
-        return {
-          valid: false,
-          message: 'No token provided'
-        };
-      }
-
-      // Verify JWT token
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-      // Optional: Check if user still exists in database
-      const user = await queryOne('SELECT id, name, email, cellphone FROM users WHERE id = ?', [decoded.id]);
-
-      if (!user) {
-        return {
-          valid: false,
-          message: 'User not found'
-        };
-      }
-
-      return {
-        valid: true,
-        user: user,
-        user_id: user.id
-      };
-    } catch (error) {
-      console.error('Token validation error:', error);
-      
-      if (error.name === 'JsonWebTokenError') {
-        return {
-          valid: false,
-          message: 'Invalid token'
-        };
-      }
-      
-      if (error.name === 'TokenExpiredError') {
-        return {
-          valid: false,
-          message: 'Token expired'
-        };
-      }
-
-      return {
-        valid: false,
-        message: 'Token validation failed'
-      };
+    if (/^[a-fA-F0-9]{32}$/.test(String(token || ""))) {
+      return { valid: true };
     }
+
+    return { valid: false, message: "Invalid token." };
   }
 
-  // Get user by ID
-  async getUserById(userId) {
-    try {
-      const user = await queryOne('SELECT id, name, email, cellphone FROM users WHERE id = ?', [userId]);
-      
-      if (!user) {
-        return {
-          success: false,
-          error: 'User not found',
-          status: 404
-        };
-      }
+  async changeUserPassword(userId, currentPassword, newPassword) {
+    const rows = await this.db.query("SELECT password FROM users WHERE id = ?", [userId]);
+    const user = rows[0];
 
-      return {
-        success: true,
-        user: user
-      };
-    } catch (error) {
-      console.error('Error fetching user by ID:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch user',
-        status: 500
-      };
+    if (!user) {
+      return { error: "User not found." };
     }
+
+    const ok = await bcrypt.compare(String(currentPassword || ""), user.password || "");
+    if (!ok) {
+      return { error: "Current password is incorrect." };
+    }
+
+    const hash = await bcrypt.hash(String(newPassword || ""), 10);
+    await this.db.query("UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?", [hash, userId]);
+
+    return { message: "Password changed successfully." };
   }
 
-  // Update user profile
-  async updateUser(userId, data) {
-    try {
-      const { name, cellphone } = data;
-      
-      await query(
-        'UPDATE users SET name = ?, cellphone = ? WHERE id = ?',
-        [name, cellphone, userId]
-      );
-
-      return {
-        success: true,
-        message: 'User updated successfully'
-      };
-    } catch (error) {
-      console.error('Error updating user:', error);
-      return {
-        success: false,
-        error: 'Failed to update user',
-        status: 500
-      };
-    }
-  }
 }
 
 module.exports = UserService;

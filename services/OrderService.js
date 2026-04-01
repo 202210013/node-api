@@ -1,553 +1,368 @@
-const { query, queryOne } = require('../config/database');
+const BaseService = require("./BaseService");
 
-class OrderService {
-  constructor() {
-    this.tableName = 'orders';
+class OrderService extends BaseService {
+  constructor(db) {
+    super(db);
   }
 
-  // Create multiple orders
-  async createOrders(orders) {
-    try {
-      console.log("=== ORDER CREATION DEBUG ===");
-      console.log("Received orders data:", orders);
+  async deductProductQuantity(productName, size, quantity, dbClient = this.db) {
+    const rows = await dbClient.query("SELECT size_quantities FROM products WHERE name = ? LIMIT 1", [productName]);
+    const product = rows[0];
+    if (!product || !product.size_quantities) {
+      return;
+    }
 
-      if (!Array.isArray(orders) || orders.length === 0) {
+    let sizeQuantities;
+    try {
+      sizeQuantities = JSON.parse(product.size_quantities);
+    } catch (_e) {
+      sizeQuantities = {};
+    }
+
+    if (Object.prototype.hasOwnProperty.call(sizeQuantities, size)) {
+      sizeQuantities[size] = Math.max(0, Number(sizeQuantities[size] || 0) - Number(quantity || 0));
+      const totalQuantity = Object.values(sizeQuantities).reduce((sum, v) => sum + Number(v || 0), 0);
+
+      await dbClient.query("UPDATE products SET size_quantities = ?, quantity = ? WHERE name = ?", [
+        JSON.stringify(sizeQuantities),
+        totalQuantity,
+        productName
+      ]);
+    }
+  }
+
+  async restoreProductQuantity(productName, size, quantity, dbClient = this.db) {
+    const rows = await dbClient.query("SELECT size_quantities FROM products WHERE name = ? LIMIT 1", [productName]);
+    const product = rows[0];
+    if (!product || !product.size_quantities) {
+      return;
+    }
+
+    let sizeQuantities;
+    try {
+      sizeQuantities = JSON.parse(product.size_quantities);
+    } catch (_e) {
+      sizeQuantities = {};
+    }
+
+    if (Object.prototype.hasOwnProperty.call(sizeQuantities, size)) {
+      sizeQuantities[size] = Number(sizeQuantities[size] || 0) + Number(quantity || 0);
+      const totalQuantity = Object.values(sizeQuantities).reduce((sum, v) => sum + Number(v || 0), 0);
+
+      await dbClient.query("UPDATE products SET size_quantities = ?, quantity = ? WHERE name = ?", [
+        JSON.stringify(sizeQuantities),
+        totalQuantity,
+        productName
+      ]);
+    }
+  }
+
+  async transferProductQuantityForSizeChange(productName, oldSize, newSize, quantity, dbClient = this.db) {
+    const rows = await dbClient.query("SELECT size_quantities FROM products WHERE name = ? LIMIT 1", [productName]);
+    const product = rows[0];
+    if (!product || !product.size_quantities) {
+      return { success: false, error: "Product inventory not found" };
+    }
+
+    let sizeQuantities;
+    try {
+      sizeQuantities = JSON.parse(product.size_quantities);
+    } catch (_e) {
+      sizeQuantities = {};
+    }
+
+    const oldSizeKey = String(oldSize || "").trim();
+    const newSizeKey = String(newSize || "").trim();
+    const qty = Number(quantity || 0);
+
+    if (!Object.prototype.hasOwnProperty.call(sizeQuantities, oldSizeKey)) {
+      sizeQuantities[oldSizeKey] = 0;
+    }
+
+    if (!Object.prototype.hasOwnProperty.call(sizeQuantities, newSizeKey)) {
+      sizeQuantities[newSizeKey] = 0;
+    }
+
+    const newSizeStock = Number(sizeQuantities[newSizeKey] || 0);
+    if (newSizeStock < qty) {
+      return {
+        success: false,
+        error: `Insufficient stock for size ${newSizeKey}. Available: ${newSizeStock}, needed: ${qty}`
+      };
+    }
+
+    sizeQuantities[oldSizeKey] = Number(sizeQuantities[oldSizeKey] || 0) + qty;
+    sizeQuantities[newSizeKey] = Math.max(0, newSizeStock - qty);
+
+    const totalQuantity = Object.values(sizeQuantities).reduce((sum, v) => sum + Number(v || 0), 0);
+    await dbClient.query("UPDATE products SET size_quantities = ?, quantity = ? WHERE name = ?", [
+      JSON.stringify(sizeQuantities),
+      totalQuantity,
+      productName
+    ]);
+
+    return { success: true };
+  }
+
+  async createOrders(orders) {
+    await this.db.withTransaction(async (tx) => {
+      for (const order of orders || []) {
+        const size = order.size || "M";
+        const pickupDate = order.pickup_date || null;
+        const orderStatus = pickupDate ? "pending" : "pending-production";
+
+        await tx.query(
+          "INSERT INTO orders (customer, product, quantity, size, status, created_at, pickup_date) VALUES (?, ?, ?, ?, ?, NOW(), ?)",
+          [order.customer, order.product, order.quantity, size, orderStatus, pickupDate]
+        );
+      }
+    });
+
+    return { success: true };
+  }
+
+  async getAllOrders(user = null) {
+    if (user) {
+      return this.db.query(
+        `SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone
+         FROM orders o
+         LEFT JOIN users u ON o.customer = u.email
+         WHERE o.customer = ?`,
+        [user]
+      );
+    }
+
+    return this.db.query(
+      `SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone
+       FROM orders o
+       LEFT JOIN users u ON o.customer = u.email`
+    );
+  }
+
+  async approveOrder(orderId) {
+    return this.db.withTransaction(async (tx) => {
+      const orderRows = await tx.query("SELECT product, size, quantity FROM orders WHERE id = ?", [orderId]);
+      const order = orderRows[0];
+      if (!order) {
+        return { success: false, error: "Order not found" };
+      }
+
+      const pickupRows = await tx.query("SELECT pickup_date FROM orders WHERE id = ?", [orderId]);
+      const pickupDate = pickupRows[0] && pickupRows[0].pickup_date
+        ? pickupRows[0].pickup_date
+        : this.getFutureDate(3);
+
+      await tx.query("UPDATE orders SET status = 'ready-for-pickup', pickup_date = ? WHERE id = ?", [pickupDate, orderId]);
+      await this.deductProductQuantity(order.product, order.size, order.quantity, tx);
+
+      return { success: true, pickup_date: pickupDate };
+    });
+  }
+
+  async declineOrder(orderId, remarks = null) {
+    return this.db.withTransaction(async (tx) => {
+      const rows = await tx.query("SELECT product, size, quantity, status FROM orders WHERE id = ?", [orderId]);
+      const order = rows[0];
+      if (!order) {
+        return { success: false, error: "Order not found" };
+      }
+
+      const shouldRestore = order.status === "ready-for-pickup";
+
+      if (remarks) {
+        try {
+          await tx.query("UPDATE orders SET status = 'declined', remarks = ? WHERE id = ?", [remarks, orderId]);
+        } catch (err) {
+          if (String(err.message || "").includes("Unknown column") && String(err.message || "").includes("remarks")) {
+            await tx.query("ALTER TABLE orders ADD COLUMN remarks TEXT NULL AFTER status");
+            await tx.query("UPDATE orders SET status = 'declined', remarks = ? WHERE id = ?", [remarks, orderId]);
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        await tx.query("UPDATE orders SET status = 'declined' WHERE id = ?", [orderId]);
+      }
+
+      if (shouldRestore) {
+        await this.restoreProductQuantity(order.product, order.size, order.quantity, tx);
+      }
+
+      return { success: true };
+    });
+  }
+
+  async markReadyForPickup(orderId) {
+    return this.db.withTransaction(async (tx) => {
+      const rows = await tx.query("SELECT product, size, quantity FROM orders WHERE id = ?", [orderId]);
+      const order = rows[0];
+      if (!order) {
+        return { success: false, error: "Order not found" };
+      }
+
+      await tx.query("UPDATE orders SET status = 'ready-for-pickup' WHERE id = ?", [orderId]);
+      await this.deductProductQuantity(order.product, order.size, order.quantity, tx);
+      return { success: true };
+    });
+  }
+
+  async confirmPickup(orderId, customerEmail, orNumber = null) {
+    return this.db.withTransaction(async (tx) => {
+      const rows = await tx.query("SELECT * FROM orders WHERE id = ?", [orderId]);
+      const order = rows[0];
+      if (!order) {
+        return { success: false, error: "Order not found" };
+      }
+
+      if (order.customer !== customerEmail) {
+        return { success: false, error: "Order does not belong to this customer" };
+      }
+
+      if (order.status !== "ready-for-pickup") {
         return {
           success: false,
-          error: 'Invalid orders data',
-          status: 400
+          error: "Order is not ready for pickup",
+          current_status: order.status
         };
       }
 
-      // Insert orders one by one
-      for (const order of orders) {
-        const size = order.size || 'M';
-        const pickupDate = order.pickup_date || null;
-        
-        // Determine order status based on pickup date
-        // If no pickup date, it's a production order for out-of-stock items
-        const orderStatus = pickupDate ? 'pending' : 'pending-production';
-        
-        console.log(`Processing order - Product: ${order.product}, Size: ${size}, Pickup Date: ${pickupDate || 'NULL'}, Status: ${orderStatus}`);
-        
-        // Insert the order
-        await query(
-          `INSERT INTO ${this.tableName} 
-           (customer, product, quantity, size, status, created_at, pickup_date) 
-           VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
-          [
-            order.customer,
-            order.product,
-            order.quantity,
-            size,
-            orderStatus,
-            pickupDate
-          ]
+      await tx.query("UPDATE orders SET status = 'completed', or_number = ? WHERE id = ?", [orNumber, orderId]);
+      return {
+        success: true,
+        message: "Order pickup confirmed successfully",
+        or_number: orNumber
+      };
+    });
+  }
+
+  async updateCompletionRemarks(orderId, remarks, size = null) {
+    if (!orderId) {
+      return { success: false, error: "Order ID is required" };
+    }
+
+    return this.db.withTransaction(async (tx) => {
+      const rows = await tx.query("SELECT status, size, product, quantity FROM orders WHERE id = ?", [orderId]);
+      const order = rows[0];
+      if (!order) {
+        return { success: false, error: "Order not found" };
+      }
+
+      if (order.status !== "completed") {
+        return { success: false, error: "Only completed orders can have completion remarks" };
+      }
+
+      const newSize = size && String(size).trim() !== "" ? String(size).trim() : null;
+      const currentSize = String(order.size || "").trim();
+      const hasSizeChange = newSize && currentSize !== "" && newSize !== currentSize;
+
+      if (hasSizeChange) {
+        const transferResult = await this.transferProductQuantityForSizeChange(
+          order.product,
+          currentSize,
+          newSize,
+          order.quantity,
+          tx
         );
 
-        // Only reduce quantity for in-stock orders (status = 'pending')
-        if (orderStatus === 'pending') {
-          // Get the product's current size_quantities
-          const product = await queryOne(
-            'SELECT size_quantities FROM products WHERE name = ?',
-            [order.product]
-          );
-
-          if (product && product.size_quantities) {
-            try {
-              const sizeQuantities = JSON.parse(product.size_quantities);
-              
-              // Reduce the quantity for the ordered size
-              if (sizeQuantities[size] !== undefined) {
-                sizeQuantities[size] = Math.max(0, sizeQuantities[size] - order.quantity);
-                
-                console.log(`Reduced quantity for ${order.product} size ${size}: ${sizeQuantities[size]}`);
-                
-                // Calculate the new total quantity (sum of all sizes)
-                const totalQuantity = Object.values(sizeQuantities).reduce((sum, qty) => sum + qty, 0);
-                
-                console.log(`New total quantity for ${order.product}: ${totalQuantity}`);
-                
-                // Update the product with new quantities AND total quantity
-                await query(
-                  'UPDATE products SET size_quantities = ?, quantity = ? WHERE name = ?',
-                  [JSON.stringify(sizeQuantities), totalQuantity, order.product]
-                );
-              }
-            } catch (parseError) {
-              console.error('Error parsing size_quantities:', parseError);
-            }
-          }
-        } else {
-          console.log(`Skipping quantity reduction for production order (status: ${orderStatus})`);
+        if (!transferResult.success) {
+          return transferResult;
         }
       }
 
-      return {
-        success: true,
-        message: 'Orders created successfully'
-      };
-    } catch (error) {
-      console.error('Error creating orders:', error);
-      return {
-        success: false,
-        error: 'Failed to create orders',
-        status: 500
-      };
-    }
-  }
-
-  // Get all orders with optional user filtering
-  async getAllOrders(userEmail = null, adminEmail = null) {
-    try {
-      let sql = `
-        SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone 
-        FROM ${this.tableName} o 
-        LEFT JOIN users u ON o.customer = u.email
-      `;
-      let params = [];
-
-      if (userEmail) {
-        sql += ' WHERE o.customer = ?';
-        params.push(userEmail);
-      }
-
-      sql += ' ORDER BY o.created_at DESC';
-
-      const orders = await query(sql, params);
-      return orders || [];
-    } catch (error) {
-      console.error('Error fetching orders:', error);
-      return [];
-    }
-  }
-
-  // Approve order
-  async approveOrder(orderId) {
-    try {
-      if (!orderId) {
-        return {
-          success: false,
-          error: 'Order ID is required',
-          status: 400
-        };
-      }
-
-      // Check if order exists and has a pickup date
-      const order = await queryOne(
-        `SELECT pickup_date FROM ${this.tableName} WHERE id = ?`,
-        [orderId]
-      );
-
-      if (!order) {
-        return {
-          success: false,
-          error: 'Order not found',
-          status: 404
-        };
-      }
-
-      // Only set pickup date if customer didn't select one (fallback to 3 days from now)
-      const pickupDate = order.pickup_date || this.getFutureDate(3);
-
-      // Update order to ready-for-pickup status
-      await query(
-        `UPDATE ${this.tableName} SET status = 'ready-for-pickup', pickup_date = ? WHERE id = ?`,
-        [pickupDate, orderId]
-      );
-
-      return {
-        success: true,
-        pickup_date: pickupDate,
-        message: 'Order approved successfully'
-      };
-    } catch (error) {
-      console.error('Error approving order:', error);
-      return {
-        success: false,
-        error: 'Failed to approve order',
-        status: 500
-      };
-    }
-  }
-
-  // Decline order
-  async declineOrder(orderId, remarks = null) {
-    try {
-      console.log("=== DECLINE ORDER DEBUG ===");
-      console.log("OrderID:", orderId);
-      console.log("Remarks:", remarks || "NULL");
-
-      if (!orderId) {
-        return {
-          success: false,
-          error: 'Order ID is required',
-          status: 400
-        };
-      }
-
-      // Check if order exists
-      const order = await queryOne(`SELECT id FROM ${this.tableName} WHERE id = ?`, [orderId]);
-
-      if (!order) {
-        return {
-          success: false,
-          error: 'Order not found',
-          status: 404
-        };
-      }
-
-      // Update order status and remarks
-      if (remarks) {
-        await query(
-          `UPDATE ${this.tableName} SET status = 'declined', remarks = ? WHERE id = ?`,
-          [remarks, orderId]
-        );
+      if (newSize) {
+        await tx.query("UPDATE orders SET completion_remarks = ?, size = ? WHERE id = ?", [remarks || "", newSize, orderId]);
       } else {
-        await query(
-          `UPDATE ${this.tableName} SET status = 'declined' WHERE id = ?`,
-          [orderId]
-        );
+        await tx.query("UPDATE orders SET completion_remarks = ? WHERE id = ?", [remarks || "", orderId]);
       }
 
-      console.log("Order declined successfully");
-      return {
-        success: true,
-        message: 'Order declined successfully'
-      };
-    } catch (error) {
-      console.error('Error declining order:', error);
-      return {
-        success: false,
-        error: 'Failed to decline order',
-        status: 500
-      };
-    }
+      return { success: true, message: "Completion remarks updated successfully" };
+    });
   }
 
-  // Mark order as ready for pickup
-  async markReadyForPickup(orderId) {
-    try {
-      if (!orderId) {
-        return {
-          success: false,
-          error: 'Order ID is required',
-          status: 400
-        };
-      }
-
-      // Check if order exists
-      const order = await queryOne(`SELECT id FROM ${this.tableName} WHERE id = ?`, [orderId]);
-
-      if (!order) {
-        return {
-          success: false,
-          error: 'Order not found',
-          status: 404
-        };
-      }
-
-      await query(
-        `UPDATE ${this.tableName} SET status = 'ready-for-pickup' WHERE id = ?`,
-        [orderId]
-      );
-
-      return {
-        success: true,
-        message: 'Order marked as ready for pickup'
-      };
-    } catch (error) {
-      console.error('Error marking order ready for pickup:', error);
-      return {
-        success: false,
-        error: 'Failed to mark order ready for pickup',
-        status: 500
-      };
-    }
-  }
-
-  // Confirm pickup
-  async confirmPickup(orderId, customerEmail, orNumber = null) {
-    try {
-      console.log("Confirm pickup request - OrderID:", orderId, "Customer:", customerEmail);
-      console.log("OR Number:", orNumber || "NULL");
-
-      if (!orderId || !customerEmail) {
-        return {
-          success: false,
-          error: 'Order ID and customer email are required',
-          status: 400
-        };
-      }
-
-      // Verify order belongs to customer
-      const order = await queryOne(
-        `SELECT id, status FROM ${this.tableName} WHERE id = ? AND customer = ?`,
-        [orderId, customerEmail]
-      );
-
-      if (!order) {
-        return {
-          success: false,
-          error: 'Order not found or access denied',
-          status: 404
-        };
-      }
-
-      if (order.status !== 'ready-for-pickup') {
-        return {
-          success: false,
-          error: 'Order is not ready for pickup',
-          status: 400
-        };
-      }
-
-      // Update order to completed
-      if (orNumber) {
-        await query(
-          `UPDATE ${this.tableName} SET status = 'completed', or_number = ? WHERE id = ?`,
-          [orNumber, orderId]
-        );
-      } else {
-        await query(
-          `UPDATE ${this.tableName} SET status = 'completed' WHERE id = ?`,
-          [orderId]
-        );
-      }
-
-      console.log(`Order ${orderId} status updated to completed with OR Number: ${orNumber || "NULL"}`);
-      
-      return {
-        success: true,
-        message: 'Order pickup confirmed successfully',
-        or_number: orNumber
-      };
-    } catch (error) {
-      console.error('Error confirming pickup:', error);
-      return {
-        success: false,
-        error: 'Failed to confirm pickup',
-        status: 500
-      };
-    }
-  }
-
-  // Update completion remarks
-  async updateCompletionRemarks(orderId, remarks) {
-    try {
-      console.log("=== UPDATE COMPLETION REMARKS DEBUG ===");
-      console.log("OrderID:", orderId);
-      console.log("Remarks:", remarks);
-
-      if (!orderId || !remarks) {
-        return {
-          success: false,
-          error: 'Order ID and remarks are required',
-          status: 400
-        };
-      }
-
-      // Check if order exists and is completed
-      const order = await queryOne(
-        `SELECT status FROM ${this.tableName} WHERE id = ?`,
-        [orderId]
-      );
-
-      if (!order) {
-        console.log(`Order ${orderId} does not exist`);
-        return {
-          success: false,
-          error: 'Order not found',
-          status: 404
-        };
-      }
-
-      if (order.status !== 'completed') {
-        console.log(`Order ${orderId} is not completed, current status: ${order.status}`);
-        return {
-          success: false,
-          error: 'Only completed orders can have completion remarks',
-          status: 400
-        };
-      }
-
-      // Update completion remarks
-      await query(
-        `UPDATE ${this.tableName} SET completion_remarks = ? WHERE id = ?`,
-        [remarks, orderId]
-      );
-
-      console.log(`Order ${orderId} completion remarks updated successfully`);
-      return {
-        success: true,
-        message: 'Completion remarks updated successfully'
-      };
-    } catch (error) {
-      console.error(`Failed to update completion remarks for order ${orderId}:`, error);
-      return {
-        success: false,
-        error: 'Failed to update completion remarks',
-        status: 500
-      };
-    }
-  }
-
-  // Get order by ID
-  async getOrderById(orderId) {
-    try {
-      if (!orderId) {
-        return {
-          success: false,
-          error: 'Order ID is required',
-          status: 400
-        };
-      }
-
-      const order = await queryOne(
-        `SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone 
-         FROM ${this.tableName} o 
-         LEFT JOIN users u ON o.customer = u.email 
-         WHERE o.id = ?`,
-        [orderId]
-      );
-
-      if (!order) {
-        return {
-          success: false,
-          error: 'Order not found',
-          status: 404
-        };
-      }
-
-      return {
-        success: true,
-        order: order
-      };
-    } catch (error) {
-      console.error('Error fetching order:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch order',
-        status: 500
-      };
-    }
-  }
-
-  // Get orders by status
-  async getOrdersByStatus(status) {
-    try {
-      const orders = await query(
-        `SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone 
-         FROM ${this.tableName} o 
-         LEFT JOIN users u ON o.customer = u.email 
-         WHERE o.status = ?
-         ORDER BY o.created_at DESC`,
-        [status]
-      );
-
-      return {
-        success: true,
-        orders: orders
-      };
-    } catch (error) {
-      console.error('Error fetching orders by status:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch orders',
-        status: 500
-      };
-    }
-  }
-
-  // Helper method to get future date
-  getFutureDate(days) {
-    const date = new Date();
-    date.setDate(date.getDate() + days);
-    return date.toISOString().split('T')[0]; // Return YYYY-MM-DD format
-  }
-
-  // Get order statistics
-  async getOrderStats() {
-    try {
-      const stats = await queryOne(`
-        SELECT 
-          COUNT(*) as total_orders,
-          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_orders,
-          SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved_orders,
-          SUM(CASE WHEN status = 'ready-for-pickup' THEN 1 ELSE 0 END) as ready_orders,
-          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
-          SUM(CASE WHEN status = 'declined' THEN 1 ELSE 0 END) as declined_orders
-        FROM ${this.tableName}
-      `);
-
-      return {
-        success: true,
-        stats: stats
-      };
-    } catch (error) {
-      console.error('Error fetching order stats:', error);
-      return {
-        success: false,
-        error: 'Failed to fetch order statistics',
-        status: 500
-      };
-    }
-  }
-
-  // Update order status and pickup date (for production orders)
   async updateOrderStatus(orderId, status, pickupDate = null) {
-    try {
-      if (!orderId) {
-        return {
-          success: false,
-          error: 'Order ID is required',
-          status: 400
-        };
-      }
-
-      // Check if order exists
-      const order = await queryOne(
-        `SELECT id, status as current_status FROM ${this.tableName} WHERE id = ?`,
-        [orderId]
-      );
-
-      if (!order) {
-        return {
-          success: false,
-          error: 'Order not found',
-          status: 404
-        };
-      }
-
-      console.log(`Updating order ${orderId} from ${order.current_status} to ${status}`);
-
-      // Update order status and pickup date
-      if (pickupDate) {
-        await query(
-          `UPDATE ${this.tableName} SET status = ?, pickup_date = ? WHERE id = ?`,
-          [status, pickupDate, orderId]
-        );
-      } else {
-        await query(
-          `UPDATE ${this.tableName} SET status = ? WHERE id = ?`,
-          [status, orderId]
-        );
-      }
-
-      console.log("Order updated successfully");
-      return {
-        success: true,
-        message: 'Order updated successfully',
-        pickup_date: pickupDate
-      };
-    } catch (error) {
-      console.error('Error updating order status:', error);
-      return {
-        success: false,
-        error: 'Failed to update order',
-        status: 500
-      };
+    const rows = await this.db.query("SELECT id, status as current_status FROM orders WHERE id = ?", [orderId]);
+    if (!rows[0]) {
+      return { success: false, error: "Order not found" };
     }
+
+    if (pickupDate) {
+      await this.db.query("UPDATE orders SET status = ?, pickup_date = ? WHERE id = ?", [status, pickupDate, orderId]);
+    } else {
+      await this.db.query("UPDATE orders SET status = ? WHERE id = ?", [status, orderId]);
+    }
+
+    return {
+      success: true,
+      message: "Order updated successfully",
+      pickup_date: pickupDate
+    };
+  }
+
+  async getOrderById(orderId) {
+    if (!orderId) {
+      return { success: false, error: "Order ID is required" };
+    }
+
+    const rows = await this.db.query(
+      `SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone
+       FROM orders o
+       LEFT JOIN users u ON o.customer = u.email
+       WHERE o.id = ?`,
+      [orderId]
+    );
+
+    if (!rows[0]) {
+      return { success: false, error: "Order not found" };
+    }
+
+    return {
+      success: true,
+      order: rows[0]
+    };
+  }
+
+  async getOrdersByStatus(status) {
+    const rows = await this.db.query(
+      `SELECT o.*, u.name as customer_name, u.cellphone as customer_cellphone
+       FROM orders o
+       LEFT JOIN users u ON o.customer = u.email
+       WHERE o.status = ?
+       ORDER BY o.created_at DESC`,
+      [status]
+    );
+
+    return {
+      success: true,
+      orders: rows
+    };
+  }
+
+  async getOrderStats() {
+    const rows = await this.db.query(
+      `SELECT
+         COUNT(*) as total_orders,
+         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_orders,
+         SUM(CASE WHEN status = 'pending-production' THEN 1 ELSE 0 END) as pending_production_orders,
+         SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved_orders,
+         SUM(CASE WHEN status = 'ready-for-pickup' THEN 1 ELSE 0 END) as ready_orders,
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
+         SUM(CASE WHEN status = 'declined' THEN 1 ELSE 0 END) as declined_orders
+       FROM orders`
+    );
+
+    return {
+      success: true,
+      stats: rows[0] || {}
+    };
+  }
+
+  getFutureDate(days) {
+    const d = new Date();
+    d.setDate(d.getDate() + Number(days || 0));
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
   }
 }
 
