@@ -9,7 +9,7 @@ class ProductService extends BaseService {
     this.userId = userId;
     this.token = token;
     this.tableName = "products";
-    this.uploadDir = path.resolve(__dirname, "../../../ecomm-images");
+    this.uploadDir = '/var/www/html/ecomm-images';
   }
 
   async createProduct(payload = {}, imageFile = null, userId = null, token = null) {

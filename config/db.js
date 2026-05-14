@@ -1,11 +1,13 @@
-const mysql = require("mysql2/promise");
+
+const mysql = require('mysql2/promise');
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "e-comm",
-  charset: process.env.DB_CHARSET || "utf8mb4",
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,        // should be localfit_user
+  password: process.env.DB_PASSWORD,// should be @1234Localfit
+  database: process.env.DB_NAME,
+  port: process.env.DB_PORT || 3306,
+  charset: process.env.DB_CHARSET || 'utf8mb4',
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0

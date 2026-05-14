@@ -5,8 +5,16 @@ const apiRouter = require("./routes/apiRouter");
 const app = express();
 
 app.use(cors({
-  origin: true,
-  credentials: true
+  origin: [
+    'https://localfit.shop',
+    'https://www.localfit.shop',
+    'https://localfitstore.vercel.app',
+    'http://localhost:4200',
+    'http://localhost:3000'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id']
 }));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));

@@ -108,7 +108,7 @@ class OrderService extends BaseService {
     await this.db.withTransaction(async (tx) => {
       for (const order of orders || []) {
         const size = order.size || "M";
-        const pickupDate = order.pickup_date || null;
+        const pickupDate = order.pickup_date ? new Date(order.pickup_date).toISOString().split('T')[0] : null;
         const orderStatus = pickupDate ? "pending" : "pending-production";
 
         await tx.query(
